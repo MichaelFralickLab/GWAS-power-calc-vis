@@ -1,0 +1,219 @@
+---
+title: "SGLT2i-induced DKA: GWAS power / sample size calculations"
+author: "Jason Moggridge"
+date: "`r Sys.Date()`"
+output: 
+  html_document:
+    highlight: haddock
+---
+
+### Information
+
+> *"The sample size of 60 individuals with SGLT2 inhibitor DKA provides >80% power to uncover a significant association (P<5x10-8) with genetic variants (minor allele frequency 0.20; odds-ratio>5) and DKA, as calculated using the R package, genpwr. Our plan is to match cases N=60 3:1 (or so) thus we will have 180 controls."*
+
+- **Design**: Case-control GWAS. 
+
+- **Sample size**: 60 cases, 180+ controls. 
+
+- **Assay**: Illumina GSA-24 (~654,027 markers)
+
+- **Assumptions**: SGLT2-DKA associated variants are presumed to have a large effect size (*OR > 5*) and be common (*MAF 0.2*) in the study population.
+
+- **Alpha**: the significance threshold is *0.05 / 1M tests = 5x10^-8*
+
+
+
+### Further Assumptions*
+
+**Genetic model**: Additive
+
+
+
+### Code
+
+```{r}
+library(tidyverse)
+library(genpwr)
+```
+
+#### Replicate the calculation of sample size: 60 cases and 180 controls...
+
+```{r}
+sample_calc <- 
+  genpwr::genpwr.calc(
+    calc = 'ss',
+    model = 'logistic',
+    ge.interaction = NULL,
+    Power = .8,
+    MAF = .2,
+    OR = 5,
+    Alpha = .05,
+    Case.Rate = seq(.01, .5, .01)
+  )
+
+sample_calc |> 
+    mutate(
+    test = str_glue('test = {Test.Model}'),
+    true = str_glue('true = {True.Model}'),
+  ) |> 
+  ggplot(aes(Case.Rate, N_total_at_Alpha_0.05)) +
+  geom_line(alpha = .76) +
+  geom_hline(yintercept = 240, lty = 2, alpha = .7) +
+  geom_vline(xintercept = .25, lty = 2, alpha = .7) +
+  scale_y_log10() +
+  scale_color_viridis_c() + 
+  facet_grid(test ~ true)
+```
+
+So we are 80% powered to detect DKA-associated markers (having MAF = 0.2 and OR > 5), using a sample of 60 cases & 180 controls, with either additive or dominant alleles, though we appear to be under-powered to detect recessive alleles. (*I am just trying to figure out how Dr. Drogmuller arrived at the sample size figure here*).
+
+----
+
+Say we start adding controls (with MAF=.2), how does our ability to detect variants with smaller effect sizes improve while keeping 80% power (ie. 20% type II error rate and 5% type I error rate)?
+
+```{r}
+# add controls and compute ratio for power calc
+sample_sizes <-
+  tibble(
+    cases = 60,
+    controls = 180,
+    added_controls = 2 ^ seq(-1, 16, 1) |> round(),
+    N_total = cases + controls + added_controls,
+    k = (N_total - cases) / cases,
+    Case.Rate = cases / N_total
+  ) |>
+  distinct()
+
+# compute power using each (N and case rate) pair
+gwas_power <- genpwr::genpwr.calc(
+  calc = 'power',
+  model = 'logistic',
+  ge.interaction = NULL,
+  N = sample_sizes$N_total,
+  Case.Rate = sample_sizes$Case.Rate,
+  MAF = .2,
+  OR = 5,
+  Alpha = 0.05,
+  True.Model = c('Dominant', 'Recessive', 'Additive'),
+  Test.Model = c('Dominant', 'Recessive', 'Additive', '2df')
+) |>
+  as_tibble() |> 
+  print()
+```
+
+
+
+----
+
+```{r}
+sample_sizes |>
+  left_join(
+    gwas_power, by = join_by(N_total, Case.Rate)
+  ) |>
+  mutate(
+    test = str_glue('test = {Test.Model}'),
+    true = str_glue('true = {True.Model}'),
+  ) |> 
+  ggplot(aes(
+    x = added_controls + 1,
+    y = `Power_at_Alpha_0.05`,
+    # color = as_factor(OR),
+  )) +
+  geom_point(size = .81) +
+  geom_line() +
+  facet_grid(test~true) +
+  scale_color_viridis_d(
+    end = .9, 
+    option = 'mako'
+  ) +
+  scale_y_continuous(
+    labels = scales::label_percent()
+  ) +
+  scale_x_log10() +
+  labs(
+    x = 'Additional controls (N + 1)',
+    y = expression('Power at alpha = 0.05'),
+    title = 
+      'Power to detect associations with 60 cases and 180+ controls',
+  ) +
+  guides(
+    shape = guide_legend('MAF', 
+                         override.aes = list(size = 2, linewidth = 1))
+  ) +
+  theme_bw() +
+  theme(
+    axis.title.y = ggtext::element_markdown()
+  )
+```
+
+----
+
+
+
+```{r}
+dat <- genpwr.calc(
+  calc = "power", 
+  model = "logistic", 
+  ge.interaction = NULL,
+  N = sample_sizes$N_total,
+  Case.Rate = sample_sizes$Case.Rate,
+  k = NULL,
+  MAF = seq(0.05, 0.8, 0.05),
+  OR = 5,
+  Alpha = 0.05,
+  True.Model = c("Dominant", "Recessive", "Additive"),
+  Test.Model = c("Dominant", "Recessive", "Additive", "2df")
+  ) |> 
+  glimpse() |> 
+  arrange(MAF) |> 
+  mutate(
+    test = str_glue('test = {Test.Model}'),
+    true = str_glue('true = {True.Model}'),
+  )
+
+dat |> 
+  ggplot(aes(MAF, Power_at_Alpha_0.05, color = MAF)) +
+  geom_line(aes(group = MAF)) +
+  geom_hline(aes(yintercept = .8),
+             lty = 2, alpha = .2) + 
+  scale_color_viridis_c(option = 'G', direction = -1) +
+  facet_grid(test ~ true) +
+  theme_classic() +
+  labs(
+    x = 'Minor Allele Frequency',
+    y = 'Power at type I error rate of 0.05',
+    subtitle = 
+      "N Cases = 60; N Controls = 180+; OR ≥ 5",
+    title = 
+      "Power to detect genetic associations for varied MAF"
+  )
+```
+
+
+<!-- New viridis palettes!! -->
+
+<!-- ```{r} -->
+<!-- c('rocket', 'mako', 'turbo') |>  -->
+<!--   map( -->
+<!--     ~ ggplot(diamonds, aes(carat, price, color = x)) + -->
+<!--       geom_point(alpha =.5, size = .1) + -->
+<!--       scale_color_viridis_c(option = .) + -->
+<!--       labs(title = .) -->
+<!--   ) |>  -->
+<!--   patchwork::wrap_plots(nrow = 1) -->
+
+<!-- ``` -->
+
+what sample size is needed to detect association with an OR > 5 for MAF 0.2
+
+```{r}
+genpwr::genpwr.calc(
+  calc = 'ss',
+  model = 'logistic',
+  Power = .8,
+  MAF = .2,
+  OR = 5,
+  Case.Rate = 1/3
+  )
+```
+
